@@ -1,0 +1,191 @@
+name: Clash7 CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check for relevant changes
+      id: check
+      run: |
+        # 判断是否需要构建
+        changed_files=$(git diff --name-only HEAD~1 HEAD)
+        echo "Changed files: $changed_files"
+        if [[ "$changed_files" =~ (backend/|frontend/|\.github/workflows/) ]]; then
+          echo "should_build=true" >> $GITHUB_OUTPUT
+        else
+          echo "should_build=false" >> $GITHUB_OUTPUT
+        fi
+
+  backend:
+    needs: setup
+    if: needs.setup.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        cd backend
+        pip install -r requirements.txt
+        pip install pytest coverage
+    - name: Run tests with coverage
+      run: |
+        cd backend
+        coverage run -m pytest
+        coverage xml
+    - name: Upload coverage report
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./backend/coverage.xml
+    - name: Build backend executable (Linux)
+      run: |
+        cd backend
+        pip install pyinstaller
+        pyinstaller --onefile --name clash7_backend main.py
+        mkdir -p ../artifacts/linux
+        cp dist/clash7_backend ../artifacts/linux/
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: backend-artifacts
+        path: ./artifacts
+
+  flutter-android:
+    needs: setup
+    if: needs.setup.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK
+      uses: actions/setup-java@v3
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.13.0'
+    - name: Install dependencies
+      run: |
+        cd frontend
+        flutter pub get
+    - name: Run tests
+      run: |
+        cd frontend
+        flutter test
+    - name: Build APK
+      run: |
+        cd frontend
+        flutter build apk --release
+        mkdir -p ../artifacts/android
+        cp build/app/outputs/flutter-apk/app-release.apk ../artifacts/android/clash7.apk
+    - name: Build AppBundle
+      run: |
+        cd frontend
+        flutter build appbundle --release
+        cp build/app/outputs/bundle/release/app-release.aab ../artifacts/android/clash7.aab
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: android-artifacts
+        path: ./artifacts/android
+
+  flutter-windows:
+    needs: [setup, backend]
+    if: needs.setup.outputs.should_build == 'true'
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.13.0'
+    - name: Install dependencies
+      run: |
+        cd frontend
+        flutter pub get
+    - name: Build Windows
+      run: |
+        cd frontend
+        flutter build windows
+        mkdir -p ../artifacts/windows
+        Copy-Item -Path "build\windows\runner\Release\*" -Destination "../artifacts/windows/" -Recurse
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: windows-artifacts
+        path: ./artifacts/windows
+
+  flutter-macos:
+    needs: setup
+    if: needs.setup.outputs.should_build == 'true' && github.event_name != 'pull_request'
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.13.0'
+    - name: Install dependencies
+      run: |
+        cd frontend
+        flutter pub get
+    - name: Build macOS
+      run: |
+        cd frontend
+        flutter build macos
+        mkdir -p ../artifacts/macos
+        cp -r build/macos/Build/Products/Release/clash7.app ../artifacts/macos/
+    - name: Create DMG (optional)
+      run: |
+        brew install create-dmg
+        cd artifacts/macos
+        create-dmg clash7.app
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: macos-artifacts
+        path: ./artifacts/macos
+
+  release:
+    needs: [backend, flutter-android, flutter-windows, flutter-macos]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: ./release-artifacts
+    - name: Create release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Clash7 v1.0.0
+        body: |
+          ### Changelog
+          - Initial release of Clash7
+          - Supports Android, Windows and macOS
+          - Built with Flutter and Python
+        draft: false
+        prerelease: false
+        files: |
+          release-artifacts/android-artifacts/clash7.apk
+          release-artifacts/android-artifacts/clash7.aab
+          release-artifacts/windows-artifacts/*
+          release-artifacts/macos-artifacts/*
+          release-artifacts/backend-artifacts/linux/clash7_backend
