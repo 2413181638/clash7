@@ -5,7 +5,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   setup:
@@ -14,13 +14,22 @@ jobs:
       should_build: ${{ steps.check.outputs.should_build }}
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 2  # 需要获取至少2个提交历史
+    
     - name: Check for relevant changes
       id: check
       run: |
-        # 判断是否需要构建
-        changed_files=$(git diff --name-only HEAD~1 HEAD)
+        # 安全地获取变更文件
+        if git rev-parse --verify HEAD~1 > /dev/null 2>&1; then
+          changed_files=$(git diff --name-only HEAD~1 HEAD)
+        else
+          # 首次提交或单次提交
+          changed_files=$(git ls-tree --name-only -r HEAD)
+        fi
+        
         echo "Changed files: $changed_files"
-        if [[ "$changed_files" =~ (backend/|frontend/|\.github/workflows/) ]]; then
+        if [[ -z "$changed_files" ]] || [[ "$changed_files" =~ (backend/|frontend/|\.github/workflows/) ]]; then
           echo "should_build=true" >> $GITHUB_OUTPUT
         else
           echo "should_build=false" >> $GITHUB_OUTPUT
