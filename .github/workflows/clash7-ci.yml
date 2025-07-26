@@ -7,6 +7,10 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+env:
+  FLUTTER_CHANNEL: stable
+  DART_VERSION: "3.1.0"
+
 jobs:
   setup:
     runs-on: ubuntu-latest
@@ -15,16 +19,14 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
-        fetch-depth: 2  # 需要获取至少2个提交历史
+        fetch-depth: 2
     
     - name: Check for relevant changes
       id: check
       run: |
-        # 安全地获取变更文件
         if git rev-parse --verify HEAD~1 > /dev/null 2>&1; then
           changed_files=$(git diff --name-only HEAD~1 HEAD)
         else
-          # 首次提交或单次提交
           changed_files=$(git ls-tree --name-only -r HEAD)
         fi
         
@@ -38,163 +40,170 @@ jobs:
   backend:
     needs: setup
     if: needs.setup.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        python-version: ["3.10"]
+        python-version: ["3.10", "3.11", "3.12"]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        exclude:
+          - os: windows-latest
+            python-version: "3.12"  # 暂时排除Windows上的Python 3.12
     steps:
     - uses: actions/checkout@v4
+    
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+    
+    - name: Cache Python dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.local/lib/python${{ matrix.python-version }}/site-packages
+          backend/__pycache__
+        key: ${{ runner.os }}-python-${{ matrix.python-version }}-${{ hashFiles('backend/requirements.txt') }}
+    
     - name: Install dependencies
       run: |
         cd backend
-        pip install -r requirements.txt
-        pip install pytest coverage
-    - name: Run tests with coverage
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt pytest coverage pyinstaller
+    
+    - name: Run tests
       run: |
         cd backend
-        coverage run -m pytest
-        coverage xml
-    - name: Upload coverage report
-      uses: codecov/codecov-action@v3
+        pytest --cov=.
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v4
       with:
-        file: ./backend/coverage.xml
-    - name: Build backend executable (Linux)
+        fail_ci_if_error: false
+    
+    - name: Build executable
       run: |
         cd backend
-        pip install pyinstaller
         pyinstaller --onefile --name clash7_backend main.py
-        mkdir -p ../artifacts/linux
-        cp dist/clash7_backend ../artifacts/linux/
+        mkdir -p ../artifacts/${{ runner.os }}
+        if [[ "${{ runner.os }}" == "Windows" ]]; then
+          cp dist/clash7_backend.exe ../artifacts/${{ runner.os }}/
+        else
+          cp dist/clash7_backend ../artifacts/${{ runner.os }}/
+        fi
+    
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: backend-artifacts
-        path: ./artifacts
+        name: backend-${{ runner.os }}-py${{ matrix.python-version }}
+        path: ./artifacts/${{ runner.os }}/
+        compression-level: 9
 
-  flutter-android:
+  flutter-build:
     needs: setup
     if: needs.setup.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        flutter-version: ["3.13.0", "3.16.0"]
+        include:
+          - os: ubuntu-latest
+            build-target: apk
+            artifact-name: android
+          - os: ubuntu-latest
+            build-target: appbundle
+            artifact-name: android-bundle
+          - os: windows-latest
+            build-target: windows
+            artifact-name: windows
+          - os: macos-latest
+            build-target: macos
+            artifact-name: macos
     steps:
     - uses: actions/checkout@v4
-    - name: Set up JDK
-      uses: actions/setup-java@v3
+    
+    - name: Set up JDK (Android only)
+      if: matrix.os == 'ubuntu-latest'
+      uses: actions/setup-java@v4
       with:
-        java-version: '11'
+        java-version: '17'
         distribution: 'temurin'
-    - name: Set up Flutter
+    
+    - name: Set up Flutter ${{ matrix.flutter-version }}
       uses: subosito/flutter-action@v2
       with:
-        flutter-version: '3.13.0'
+        flutter-version: ${{ matrix.flutter-version }}
+        channel: ${{ env.FLUTTER_CHANNEL }}
+    
+    - name: Cache Flutter dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.pub-cache
+          frontend/.dart_tool
+          /opt/hostedtoolcache/flutter
+        key: ${{ runner.os }}-flutter-${{ matrix.flutter-version }}-${{ hashFiles('frontend/pubspec.lock') }}
+    
     - name: Install dependencies
       run: |
         cd frontend
         flutter pub get
+    
     - name: Run tests
       run: |
         cd frontend
         flutter test
-    - name: Build APK
+    
+    - name: Build ${{ matrix.build-target }}
       run: |
         cd frontend
-        flutter build apk --release
-        mkdir -p ../artifacts/android
-        cp build/app/outputs/flutter-apk/app-release.apk ../artifacts/android/clash7.apk
-    - name: Build AppBundle
-      run: |
-        cd frontend
-        flutter build appbundle --release
-        cp build/app/outputs/bundle/release/app-release.aab ../artifacts/android/clash7.aab
+        flutter build ${{ matrix.build-target }} --release
+        mkdir -p ../artifacts/${{ matrix.artifact-name }}
+        
+        if [[ "${{ matrix.build-target }}" == "apk" ]]; then
+          cp build/app/outputs/flutter-apk/app-release.apk ../artifacts/${{ matrix.artifact-name }}/
+        elif [[ "${{ matrix.build-target }}" == "appbundle" ]]; then
+          cp build/app/outputs/bundle/release/app-release.aab ../artifacts/${{ matrix.artifact-name }}/
+        elif [[ "${{ matrix.build-target }}" == "windows" ]]; then
+          cp -r build/windows/runner/Release/* ../artifacts/${{ matrix.artifact-name }}/
+        elif [[ "${{ matrix.build-target }}" == "macos" ]]; then
+          cp -r build/macos/Build/Products/Release/clash7.app ../artifacts/${{ matrix.artifact-name }}/
+        fi
+    
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: android-artifacts
-        path: ./artifacts/android
-
-  flutter-windows:
-    needs: [setup, backend]
-    if: needs.setup.outputs.should_build == 'true'
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        flutter-version: '3.13.0'
-    - name: Install dependencies
-      run: |
-        cd frontend
-        flutter pub get
-    - name: Build Windows
-      run: |
-        cd frontend
-        flutter build windows
-        mkdir -p ../artifacts/windows
-        Copy-Item -Path "build\windows\runner\Release\*" -Destination "../artifacts/windows/" -Recurse
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: windows-artifacts
-        path: ./artifacts/windows
-
-  flutter-macos:
-    needs: setup
-    if: needs.setup.outputs.should_build == 'true' && github.event_name != 'pull_request'
-    runs-on: macos-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        flutter-version: '3.13.0'
-    - name: Install dependencies
-      run: |
-        cd frontend
-        flutter pub get
-    - name: Build macOS
-      run: |
-        cd frontend
-        flutter build macos
-        mkdir -p ../artifacts/macos
-        cp -r build/macos/Build/Products/Release/clash7.app ../artifacts/macos/
-    - name: Create DMG (optional)
-      run: |
-        brew install create-dmg
-        cd artifacts/macos
-        create-dmg clash7.app
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: macos-artifacts
-        path: ./artifacts/macos
+        name: flutter-${{ matrix.artifact-name }}-${{ matrix.flutter-version }}
+        path: ./artifacts/${{ matrix.artifact-name }}/
+        compression-level: 9
+        if-no-files-found: error
 
   release:
-    needs: [backend, flutter-android, flutter-windows, flutter-macos]
+    needs: [backend, flutter-build]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
     - name: Download all artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         path: ./release-artifacts
+    
     - name: Create release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         name: Clash7 v1.0.0
         body: |
-          ### Changelog
-          - Initial release of Clash7
-          - Supports Android, Windows and macOS
-          - Built with Flutter and Python
+          ### Build Matrix
+          - Python versions: 3.10, 3.11, 3.12
+          - Flutter versions: 3.13.0, 3.16.0
+          - Platforms: Windows, macOS, Linux, Android
+          
+          ### Changes
+          - Full build matrix support
+          - Optimized caching
+          - Latest GitHub Actions versions
         draft: false
         prerelease: false
         files: |
-          release-artifacts/android-artifacts/clash7.apk
-          release-artifacts/android-artifacts/clash7.aab
-          release-artifacts/windows-artifacts/*
-          release-artifacts/macos-artifacts/*
-          release-artifacts/backend-artifacts/linux/clash7_backend
+          release-artifacts/**/*
