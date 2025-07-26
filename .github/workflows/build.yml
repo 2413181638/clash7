@@ -1,4 +1,4 @@
-name: Build and Package Clash Client
+name: Build and Package Clash7 Client
 
 on:
   push:
@@ -11,24 +11,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 检出代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 设置 Python 环境
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 安装 Python 依赖
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
           pip install pyinstaller
 
-      # 下载 Mihomo 内核
       - name: Download Mihomo binary
         run: |
           mkdir -p bin
@@ -37,34 +33,29 @@ jobs:
           mv mihomo-linux-amd64-v1.18.9 bin/mihomo
           chmod +x bin/mihomo
 
-      # 打包 Python 后端
       - name: Package Python backend
         run: |
           cd backend
           pyinstaller --onefile --add-data "config.yaml:." main.py
-          mv dist/main ../clash_client_backend
+          mv dist/main ../clash7_backend
         env:
           PYINSTALLER_NO_CLEAN: 1
 
-      # 设置 Flutter 环境
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      # 安装 Flutter 依赖
       - name: Install Flutter dependencies
         run: flutter pub get
 
-      # 解码 Android 签名密钥（如果配置）
       - name: Decode Android keystore
         if: env.ANDROID_KEYSTORE != ''
         run: echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 -d > android/app/key.jks
         env:
           ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
 
-      # 构建 Flutter APK
       - name: Build Flutter APK
         run: flutter build apk --release
         env:
@@ -72,11 +63,10 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
 
-      # 上传 artifacts
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: clash-client-artifacts
+          name: clash7-artifacts
           path: |
-            clash_client_backend
+            clash7_backend
             build/app/outputs/flutter-apk/app-release.apk
